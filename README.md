@@ -1,72 +1,116 @@
-# FloodVision: Multimodal Flood Detection
+# FloodVision: Multi-Modal Flood Detection
 
-A deep learning pipeline for flood detection using **Sentinel-1 (SAR)** and **Sentinel-2 (Optical)** satellite imagery. This project implements a **Gated Fusion Network** to robustly detect water even in cloudy conditions by leveraging the all-weather capabilities of SAR.
+FloodVision is a deep learning project designed to detect flood water from satellite imagery. It leverages multi-modal data fusion, combining Sentinel-1 (SAR) and Sentinel-2 (Optical) imagery to robustly map floods even in cloudy conditions where optical sensors fail.
 
-## Features
+## Project Overview
 
-- **Multimodal Data Loading**: Handles S1 (Radar), S2 (Optical), and Flood Masks.
-- **Geographic Splitting**: Ensures zero overlap between Train/Test regions (e.g., Train on Americas, Test on Asia).
-- **Robust Preprocessing**: Automatic normalization and dB scaling for SAR data.
-- **Deep Learning**: Implementations of Encoder-Decoder architectures (UNet/ResNet).
+Traditional flood mapping relies heavily on optical imagery, which is often obstructed by clouds during storm events. Radar (SAR) sees through clouds but is noisy and harder to interpret. This project uses a **Gated Fusion Network** to:
 
-## Project Structure
+1.  **Pre-train** on massive cloud datasets to learn robust optical features.
+2.  **Fuse** Optical and Radar data using an attention mechanism that learns to "trust" the Radar signal when the Optical signal is cloudy.
+3.  **Detect** water/flood pixels with high accuracy across varying weather conditions.
 
-```text
-flood_vision/
-├── data/                   # Dataset storage (downloaded automatically)
-│   └── sen1floods11/       # Sen1Floods11 Dataset
-│       └── splits/         # CSV files defining Train/Test sets
+## Repository Structure
+
+```
+flood vision/
+├── checkpoints/          # Saved model weights
+├── data/                 # Dataset storage
+│   ├── sen1floods11/     # Main flood dataset
+│   └── cloudsen12/       # Pre-training cloud dataset
 ├── src/
 │   ├── data/
-│   │   ├── download_datasets.py  # Script to fetch data
-│   │   ├── dataset.py            # PyTorch Dataset class
-│   │   ├── preprocessing.py      # Split generation script
-│   │   └── transforms.py         # Albumentations
-│   ├── models/                   # Neural Network architectures
-│   └── training/                 # Training loops and metrics
-├── notebooks/              # Jupyter notebooks for exploration
-└── requirements.txt        # Python dependencies
+│   │   ├── dataset.py            # PyTorch Dataset classes (Sen1Floods11, CloudSEN12)
+│   │   ├── download_datasets.py  # Scripts to fetch data from cloud/FTP
+│   │   └── preprocessing.py      # Splits data into Train/Test (Geographic Split)
+│   ├── models/
+│   │   ├── decoders.py           # Main FloodNet architecture
+│   │   ├── fusion.py             # Gated Fusion module (Attention mechanism)
+│   │   └── pretraining.py        # CloudNet for pre-training
+├── train.py              # Main training script (Flood Detection)
+├── evaluate.py           # Evaluation script (IoU metrics)
+├── pretrain.py           # Pre-training script (Cloud Detection)
+└── notes.txt             # Development notes
 ```
 
-## Setup & Installation
+## Getting Started
 
-1.  **Clone the repo:**
+### 1. Prerequisites
 
-    ```bash
-    git clone https://github.com/yourusername/flood-vision.git
-    cd flood-vision
-    ```
+- Python 3.8+
+- PyTorch
+- Rasterio
+- Albumentations
+- Google Cloud SDK (`gsutil`) - for downloading Sen1Floods11
 
-2.  **Install Dependencies:**
+### 2. Data Preparation
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+This project automates data downloading. You will need approximately **15GB** of space for the core datasets.
 
-    _Note: You may need to install `gdal` or `rasterio` binaries separately depending on your OS._
+**Step A: Download Data**
 
-3.  **Download Data:**
+```bash
+# Download Sen1Floods11 (Flood Data)
+python src/data/download_datasets.py sen1floods11
 
-    ```bash
-    # Download Sen1Floods11 (requires gsutil)
-    python src/data/download_datasets.py sen1floods11
-    ```
+# Download CloudSEN12 (Cloud Data for Pre-training)
+python src/data/download_datasets.py cloudsen12
+```
 
-4.  **Generate Splits:**
-    ```bash
-    # Creates train_split.csv and test_split.csv
-    python src/data/preprocessing.py
-    ```
+**Step B: Generate Splits**
+To ensure fair evaluation, we split the data geographically (e.g., training on America/Africa, testing on Asia).
 
-## Dataset
+```bash
+# Scans the downloaded files and creates train_split.csv / test_split.csv
+python src/data/preprocessing.py
+```
 
-The project primarily uses **Sen1Floods11**, a benchmark dataset containing co-registered Sentinel-1 and Sentinel-2 imagery with hand-labeled water masks.
+## Model Training
 
-- **Train Set**: ~280 images (Bolivia, Ghana, Nigeria, Paraguay, Somalia, Spain, USA)
-- **Test Set**: ~170 images (India, Cambodia, Pakistan, Sri Lanka, Mekong)
+### Phase 1: Pre-training (Optional but Recommended)
 
-## Model Architecture (Planned)
+Pre-train the Optical Encoder to understand clouds. This helps the fusion module identify when to ignore the optical signal.
 
-- **Encoders**: Dual ResNet34 backbones (one for S1, one for S2).
-- **Fusion**: Gated Fusion Module to suppress Optical features when clouds are detected.
-- **Decoder**: UNet decoder outputting a binary flood mask.
+```bash
+python pretrain.py --epochs 5 --save_path checkpoints/pretrained_s2.pth
+```
+
+### Phase 2: Flood Detection Training
+
+Train the full dual-stream model (S1 + S2). If you ran Phase 1, it will load the pre-trained weights to initialize the optical branch.
+
+```bash
+# Train for 20 epochs with a batch size of 8
+python train.py --epochs 20 --batch_size 8 --s2_weights checkpoints/pretrained_s2.pth
+```
+
+- **Outputs:** Saves the best model to `checkpoints/best_model.pth`.
+- **Logs:** Displays training loss and validation IoU (Intersection over Union) for the Water class.
+
+## Evaluation
+
+Evaluate the model on the unseen test regions. The evaluation script calculates the **Mean IoU** and also provides a stratified report (performance on clear vs. cloudy images).
+
+```bash
+python evaluate.py --checkpoint checkpoints/best_model.pth
+```
+
+**Example Output:**
+
+```
+--- Evaluation Results ---
+Overall mIoU: 0.7421
+Clear Images (n=45) mIoU:  0.7810
+Cloudy Images (n=12) mIoU: 0.6105
+```
+
+## Model Architecture
+
+The core model (`FloodNet`) consists of:
+
+1.  **S1 Encoder:** ResNet-based encoder for SAR (Sentinel-1) data.
+2.  **S2 Encoder:** ResNet-based encoder for Optical (Sentinel-2) data.
+3.  **Gated Fusion Module:** A learnable attention gate that takes features from both encoders and outputs a weighted combination:
+    $F_{fused} = \alpha \cdot F_{S2} + (1 - \alpha) \cdot F_{S1}$
+    Where $\alpha$ is the learned attention map (0 to 1).
+4.  **Decoder:** Upsamples the fused features to generate the final binary flood mask.
